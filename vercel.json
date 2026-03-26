@@ -1,6 +1,6 @@
 {
   "routes": [
-    { "src": "/", "dest": "/jepa_lens_dashboard.html" },
+    { "src": "/", "dest": "/dashboard.html" },
     { "src": "/(.*)", "dest": "/$1" }
   ]
 }

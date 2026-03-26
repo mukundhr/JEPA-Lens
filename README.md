@@ -1,55 +1,85 @@
 # JEPA-Lens
-Mapping and steering model understanding via predictive representations.
+Probing predictive representations to understand what models find predictable.
 
 JEPA-Lens is a from-scratch Image JEPA project on CIFAR-10.  
-Instead of reconstructing pixels, it predicts masked patch representations and uses prediction error as an "understanding map" signal.
+Instead of reconstructing pixels, it predicts masked patch representations and uses prediction error as a signal to study what the model finds easy or difficult to predict.
 
-## What this project is trying to answer
-Most model-interpretability tools ask: "Which pixels influenced a class decision?"
+---
 
-JEPA-Lens asks a different question:
-- Which parts of an image are easy for the model to *predict from context*?
-- Which parts remain hard or uncertain?
+## What this project asks
 
-That distinction gives a map of what the model finds structurally simple vs semantically complex.
+JEPA-Lens asks:
+
+- Which regions are predictable from context?
+- Which regions remain difficult to predict?
+
+This reframes understanding as predictability.
+
+---
 
 ## Core idea
-- Low prediction error: region is easy and predictable.
-- High prediction error: region is complex or uncertain.
-- No labels are required to produce these heatmaps.
 
-## Why JEPA (not pixel reconstruction)
-In JEPA, the model does not try to regenerate missing pixels.  
-It predicts latent representations of hidden regions from visible context.
+- Low prediction error → region is easy to infer from context  
+- High prediction error → region is difficult or uncertain  
 
-This pushes learning toward higher-level structure (shape, layout, object parts), rather than low-level texture matching.
+These per-patch errors form an "understanding map" without using labels.
+
+---
+
+## What this project finds
+
+Prediction error is not a simple signal.
+
+Through causal and controlled tests, we find:
+
+- It is not random noise  
+- It is not an edge detector  
+- It is not purely semantic  
+
+Instead, it is a mixed signal:
+
+- A stable structural component that persists under geometric transforms  
+- A fine-grained component sensitive to texture and local detail  
+
+This suggests that predictability captures structure correlated with semantics, but remains entangled with low-level information.
+
+---
+
+## Why JEPA
+
+JEPA predicts representations instead of pixels.
+
+This encourages learning:
+
+- shape and layout  
+- object parts  
+- contextual relationships  
+
+rather than texture reconstruction.
+
+---
 
 ## How it works
 
-### The architecture
+### Architecture
 
 ```text
 Image (32x32)
     |
-PatchEmbed - cuts image into 8x8 grid = 64 patches of 4x4 pixels each
+PatchEmbed → 8x8 grid (64 patches of 4x4 pixels)
     |
-Mask sampling (baseline v2):
-    - One context set: 50% of patches (32) -> online Encoder
-    - Four target sets: 25% each (16 each) -> target Encoder (EMA copy)
-    - Target sets are sampled independently (can overlap)
+Mask sampling:
+    - 50% context → online encoder
+    - 4 target sets (25% each) → target encoder (EMA)
     |
-Online Encoder runs once on context -> context representations
-Target Encoder runs for each target set -> target representations
+Online encoder → context representations
+Target encoder → target representations
     |
-Predictor -> from context representations + target positions,
-             predicts each target set
+Predictor → predicts target representations from context
     |
-Loss = mean MSE across target sets:
-       MSE(predicted target repr, target-encoder repr)
-       <- representation space, NOT pixel space
-```
+Loss = MSE in representation space
 
-For variant fine-tuning in `train_variants.py`, masking is single-split per step (except `high_mask`, which uses 25% context / 75% target).
+```
 
 ## Why two encoders are used
 - Online encoder: updated by backprop every step.
@@ -57,13 +87,13 @@ For variant fine-tuning in `train_variants.py`, masking is single-split per step
 
 This avoids collapse and stabilizes self-supervised training.
 
-## Baseline vs variants
-- Baseline v2 (`train.py`): depth-6 encoder, multi-crop target sampling, 60 epochs.
-- Noise-robust: online encoder sees noisy input, target path sees clean input.
-- Structure-focused: edge-based input to emphasize shape boundaries.
-- High-mask: hides 75% of patches to force stronger global reasoning.
+## variants
+- Baseline v2: depth 6, multi-crop masking
+- Noise-robust: noisy input for online encoder
+- Structure-focused: edge-based input
+- High-mask: 75% masked
 
-Variants are fine-tuned from `baseline_v2` in `train_variants.py`.
+Variants are fine-tuned from the baseline.
 
 ## How to read the outputs
 - Linear probe accuracy:
@@ -76,17 +106,6 @@ Variants are fine-tuned from `baseline_v2` in `train_variants.py`.
   - Green/cool regions: predictable from context.
   - Red/warm regions: uncertain or complex.
   - Useful signal is often in *differences between variants*.
-
-## Repository layout
-- `train.py`: train baseline v2 (depth 6, multi-crop masking, 60 epochs), saves `checkpoints/baseline_v2.pth`.
-- `train_variants.py`: fine-tune additional variants from `baseline_v2`.
-- `evaluate.py`: linear probe, t-SNE, and understanding-map outputs for a checkpoint.
-- `understanding.py`: side-by-side per-patch vs sliding-window understanding maps.
-- `visuals.py`: masking visualization (what encoder saw vs hidden patches).
-- `signal_nature_test.py`: tests whether the understanding signal is semantic vs texture/edge driven.
-- `consistency_test.py`: tests transformation consistency (flip and crop stability).
-- `causal_test.py`: ablation-style causal test (high-error vs low-error vs random patch removal).
-- `dashboard.py`: generates a self-contained HTML dashboard at `jepa_lens_dashboard.html`.
 
 ## Setup
 ```bash
@@ -198,15 +217,22 @@ python dashboard.py
 ```
 
 Output:
-- `jepa_lens_dashboard.html`
+- `dashboard.html`
+
+The dashboard includes:
+- Overview and pipeline summary
+- Interactive understanding-map viewer
+- t-SNE and masking visualizations
+- Validation experiments
+- Training curves and artifact-status cards
 
 ## Typical workflow
-1. `python train.py`
-2. `python train_variants.py`
-3. Evaluate each checkpoint with `evaluate.py`
-4. Generate extra diagnostics with `understanding.py` and `visuals.py`
-5. Run `signal_nature_test.py`, `consistency_test.py`, and `causal_test.py` for deeper validation
-6. Build presentation artifact with `dashboard.py`
+1. Train baseline
+2. Train variants
+3. Evaluate checkpoints
+4. Visualize maps
+5. Run validation experiments
+6. Generate dashboard
 
 ## What success looks like
 - Training loss trends down without instability.
