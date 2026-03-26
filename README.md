@@ -83,6 +83,9 @@ Variants are fine-tuned from `baseline_v2` in `train_variants.py`.
 - `evaluate.py`: linear probe, t-SNE, and understanding-map outputs for a checkpoint.
 - `understanding.py`: side-by-side per-patch vs sliding-window understanding maps.
 - `visuals.py`: masking visualization (what encoder saw vs hidden patches).
+- `signal_nature_test.py`: tests whether the understanding signal is semantic vs texture/edge driven.
+- `consistency_test.py`: tests transformation consistency (flip and crop stability).
+- `causal_test.py`: ablation-style causal test (high-error vs low-error vs random patch removal).
 - `dashboard.py`: generates a self-contained HTML dashboard at `jepa_lens_dashboard.html`.
 
 ## Setup
@@ -153,6 +156,41 @@ python visuals.py --checkpoint checkpoints/baseline_v2.pth
 - What context the encoder actually saw
 - Error over hidden patches
 
+## Validation tests
+These scripts move beyond visual inspection and test whether error maps are meaningful.
+
+### 1) Signal nature test
+Checks whether prediction-error maps are stable under blur, weakly tied to raw edges, and distinct from an edge-focused model.
+
+```bash
+python signal_nature_test.py --baseline checkpoints/baseline_v2.pth --structure checkpoints/structure_focused.pth
+```
+
+Main outputs:
+- `outputs/signal_nature_test.png`
+- `outputs/signal_nature_qualitative.png`
+
+### 2) Consistency test
+Checks if understanding maps remain consistent under input transformations (horizontal flip and random crop).
+
+```bash
+python consistency_test.py
+```
+
+Main output:
+- `outputs/transform_consistency.png`
+
+### 3) Causal test
+Tests the core claim directly: if high-error patches are semantically important, ablating them should hurt linear-probe accuracy more than ablating low-error or random patches.
+
+```bash
+python causal_test.py --checkpoint checkpoints/baseline_v2.pth
+python causal_test.py --checkpoint checkpoints/baseline_v2.pth --k 8 16 24
+```
+
+Main output:
+- `outputs/causal_test_<variant>.png`
+
 ## Dashboard
 Generate a single-file HTML report (no server required):
 ```bash
@@ -167,7 +205,8 @@ Output:
 2. `python train_variants.py`
 3. Evaluate each checkpoint with `evaluate.py`
 4. Generate extra diagnostics with `understanding.py` and `visuals.py`
-5. Build presentation artifact with `dashboard.py`
+5. Run `signal_nature_test.py`, `consistency_test.py`, and `causal_test.py` for deeper validation
+6. Build presentation artifact with `dashboard.py`
 
 ## What success looks like
 - Training loss trends down without instability.
