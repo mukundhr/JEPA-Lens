@@ -1,160 +1,185 @@
-# JEPA-Lens 🔍
-### Mapping and Steering Model Understanding via Predictive Representations
+# JEPA-Lens
+Mapping and steering model understanding via predictive representations.
 
-> *"A system that reveals what parts of an image a model truly understands — by measuring how well it can predict them without seeing them."*
+JEPA-Lens is a from-scratch Image JEPA project on CIFAR-10.  
+Instead of reconstructing pixels, it predicts masked patch representations and uses prediction error as an "understanding map" signal.
 
----
+## What this project is trying to answer
+Most model-interpretability tools ask: "Which pixels influenced a class decision?"
 
-## What is this?
+JEPA-Lens asks a different question:
+- Which parts of an image are easy for the model to *predict from context*?
+- Which parts remain hard or uncertain?
 
-JEPA-Lens is a from-scratch implementation of **Image JEPA (Joint Embedding Predictive Architecture)** — Yann LeCun's proposed alternative to generative models like LLMs and diffusion models.
+That distinction gives a map of what the model finds structurally simple vs semantically complex.
 
-The core idea: instead of predicting raw pixels, predict **abstract representations** of missing image regions. The model never reconstructs what a patch looks like — it only predicts what it *means*. This forces the encoder to learn semantically meaningful structure rather than pixel-level texture.
+## Core idea
+- Low prediction error: region is easy and predictable.
+- High prediction error: region is complex or uncertain.
+- No labels are required to produce these heatmaps.
 
-JEPA-Lens extends this by using the **prediction error as a signal of understanding**:
-- Low error → model finds this region predictable (background, uniform texture)
-- High error → model finds this region complex (object faces, boundaries, fine structure)
+## Why JEPA (not pixel reconstruction)
+In JEPA, the model does not try to regenerate missing pixels.  
+It predicts latent representations of hidden regions from visible context.
 
-This produces an **Understanding Map** — a heatmap showing what the model considers structured vs trivial, without any labels or gradients.
-
----
-
-## Why is this different from saliency maps?
-
-| | Saliency Maps | JEPA-Lens Understanding Maps |
-|---|---|---|
-| Signal source | Gradients w.r.t. a label | Prediction error in representation space |
-| Requires labels | Yes | No |
-| Requires gradients | Yes | No |
-| What it measures | What affects the output | What the model finds unpredictable |
-
----
+This pushes learning toward higher-level structure (shape, layout, object parts), rather than low-level texture matching.
 
 ## How it works
 
 ### The architecture
 
+```text
+Image (32x32)
+    |
+PatchEmbed - cuts image into 8x8 grid = 64 patches of 4x4 pixels each
+    |
+Mask sampling (baseline v2):
+    - One context set: 50% of patches (32) -> online Encoder
+    - Four target sets: 25% each (16 each) -> target Encoder (EMA copy)
+    - Target sets are sampled independently (can overlap)
+    |
+Online Encoder runs once on context -> context representations
+Target Encoder runs for each target set -> target representations
+    |
+Predictor -> from context representations + target positions,
+             predicts each target set
+    |
+Loss = mean MSE across target sets:
+       MSE(predicted target repr, target-encoder repr)
+       <- representation space, NOT pixel space
 ```
-Image (32×32)
-    ↓
-PatchEmbed — cuts image into 8×8 grid = 64 patches of 4×4 pixels each
-    ↓
-Random mask — splits 64 patches into:
-    • Context patches (50%) → fed to online Encoder
-    • Target patches  (50%) → fed to target Encoder (EMA copy)
-    ↓
-Online Encoder → context representations
-Target Encoder → target representations (ground truth)
-    ↓
-Predictor → given context representations + target positions,
-            predict what the target representations should be
-    ↓
-Loss = MSE(predicted representations, true representations)
-       ← in representation space, NOT pixel space
-```
 
-### The two-encoder trick (anti-collapse)
+For variant fine-tuning in `train_variants.py`, masking is single-split per step (except `high_mask`, which uses 25% context / 75% target).
 
-If one encoder produced both context and target representations, it would collapse — mapping everything to the same vector makes prediction trivially easy. Instead:
+## Why two encoders are used
+- Online encoder: updated by backprop every step.
+- Target encoder: updated slowly by EMA.
 
-- **Online encoder** — trained via backprop, updates every step
-- **Target encoder** — updated only via EMA (slowly drifts toward online encoder)
+This avoids collapse and stabilizes self-supervised training.
 
-The target encoder is always slightly ahead of the online encoder, forcing genuine learning rather than shortcut solutions.
+## Baseline vs variants
+- Baseline v2 (`train.py`): depth-6 encoder, multi-crop target sampling, 60 epochs.
+- Noise-robust: online encoder sees noisy input, target path sees clean input.
+- Structure-focused: edge-based input to emphasize shape boundaries.
+- High-mask: hides 75% of patches to force stronger global reasoning.
 
-### Multi-crop masking (v2)
+Variants are fine-tuned from `baseline_v2` in `train_variants.py`.
 
-Instead of one target region per image per step, v2 samples **4 target regions** from the same context. The encoder gets 4× the gradient signal without seeing 4× more data — forcing representations useful for predicting any region, not just one lucky mask.
+## How to read the outputs
+- Linear probe accuracy:
+  - Quick sanity check for semantic quality of learned features.
+  - Random chance is 10% on CIFAR-10.
+- t-SNE:
+  - If embeddings are one blob, representations are weak.
+  - If class clusters emerge, representations carry structure.
+- Understanding maps:
+  - Green/cool regions: predictable from context.
+  - Red/warm regions: uncertain or complex.
+  - Useful signal is often in *differences between variants*.
 
----
+## Repository layout
+- `train.py`: train baseline v2 (depth 6, multi-crop masking, 60 epochs), saves `checkpoints/baseline_v2.pth`.
+- `train_variants.py`: fine-tune additional variants from `baseline_v2`.
+- `evaluate.py`: linear probe, t-SNE, and understanding-map outputs for a checkpoint.
+- `understanding.py`: side-by-side per-patch vs sliding-window understanding maps.
+- `visuals.py`: masking visualization (what encoder saw vs hidden patches).
+- `dashboard.py`: generates a self-contained HTML dashboard at `jepa_lens_dashboard.html`.
 
 ## Setup
-
 ```bash
-# Clone
 git clone https://github.com/mukundhr/JEPA-Lens.git
 cd JEPA-Lens
 
-# Install dependencies (CUDA version for GPU)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install torch torchvision
 pip install -r requirements.txt
+```
 
-# Verify GPU
+Optional GPU check:
+```bash
 python -c "import torch; print(torch.cuda.is_available())"
 ```
 
----
-
-## Training
-
+## Quick start
+Train baseline v2:
 ```bash
-# Baseline (30 epochs, depth 4) — ~30-45 mins on RTX 3060
 python train.py
-
-# Improved (60 epochs, depth 6, multi-crop) — ~60-75 mins on RTX 3060
-python train_v2.py
 ```
 
-CIFAR-10 (~170MB) downloads automatically on first run.
+This saves:
+- `checkpoints/baseline_v2.pth`
+- `outputs/loss_curve_v2.png`
 
-After training, `evaluate.py` runs automatically and produces:
-- `outputs/loss_curve.png` — training curve
-- `outputs/tsne_baseline.png` — t-SNE of encoder representations
-- `outputs/understanding_map_baseline.png` — per-patch and sliding window heatmaps
+and auto-runs:
+- `evaluate.py --checkpoint checkpoints/baseline_v2.pth`
 
----
+CIFAR-10 downloads automatically on first run.
 
-## Evaluation
-
+## Evaluate checkpoints
 ```bash
-# Run manually on any checkpoint
-python evaluate.py --checkpoint checkpoints/baseline.pth
 python evaluate.py --checkpoint checkpoints/baseline_v2.pth
+python evaluate.py --checkpoint checkpoints/noise_robust.pth
+python evaluate.py --checkpoint checkpoints/structure_focused.pth
+python evaluate.py --checkpoint checkpoints/high_mask.pth
 ```
 
-**What to look for:**
-- Loss curve should fall steadily without plateauing early
-- t-SNE should show loose class clustering (not a uniform blob)
-- Linear probe accuracy >> 10% (random chance) confirms semantic structure
+Typical outputs:
+- `outputs/tsne_<variant>.png`
+- `outputs/understanding_map_<variant>.png`
 
----
-
-## Understanding Maps
+## Train variants
+`train_variants.py` expects `checkpoints/baseline_v2.pth` to exist and fine-tunes variant checkpoints.
 
 ```bash
-# Per-patch and sliding window comparison
-python understanding_map.py --checkpoint checkpoints/baseline.pth
-
-# Masking visualization — what encoder saw vs what was hidden
-python visualize_masking.py --checkpoint checkpoints/baseline.pth
+python train_variants.py
 ```
 
----
+Variant checkpoints:
+- `checkpoints/noise_robust.pth`
+- `checkpoints/structure_focused.pth`
+- `checkpoints/high_mask.pth`
 
-## Results (baseline)
+## Additional visualizations
+```bash
+python understanding.py --checkpoint checkpoints/baseline_v2.pth
+python visuals.py --checkpoint checkpoints/baseline_v2.pth
+```
 
-| Metric | Value |
-|---|---|
-| Linear probe accuracy (2k train) | 41.5% |
-| Linear probe accuracy (50k train) | 52.1% |
-| Random baseline | 10.0% |
-| Training time (RTX 3060) | ~35 mins |
-| Parameters | 2M |
-| Dataset | CIFAR-10 (50k images) |
+`understanding.py` compares:
+- Per-patch masking (fast, blocky)
+- Sliding-window masking (smoother, slower)
 
-Understanding maps show consistent semantic structure — object regions (faces, bodies, boundaries) show higher prediction error than background regions, emerging purely from the self-supervised objective with no labels.
+`visuals.py` shows:
+- Original image
+- What context the encoder actually saw
+- Error over hidden patches
 
----
+## Dashboard
+Generate a single-file HTML report (no server required):
+```bash
+python dashboard.py
+```
 
-## Key insight
+Output:
+- `jepa_lens_dashboard.html`
 
-The encoder doesn't know what's important upfront. It discovers importance through the training objective — only features that help predict missing patches survive. Sky and background never help predict a dog's face. The dog's posture and shape always do. This distinction emerges from physics and semantics, not from human annotation.
+## Typical workflow
+1. `python train.py`
+2. `python train_variants.py`
+3. Evaluate each checkpoint with `evaluate.py`
+4. Generate extra diagnostics with `understanding.py` and `visuals.py`
+5. Build presentation artifact with `dashboard.py`
 
-> *Low prediction error = the model finds this region trivially predictable.*
-> *High prediction error = the model finds this region genuinely complex.*
-> *The gap between the two is where understanding lives.*
+## What success looks like
+- Training loss trends down without instability.
+- Linear probe is far above 10% random chance.
+- t-SNE shows meaningful grouping.
+- Understanding maps consistently highlight object-relevant regions more than flat background.
+- Variant maps shift in plausible ways given the training change.
 
----
+## Scope and limitations
+- This is a compact CIFAR-10 research prototype, not a production I-JEPA implementation.
+- Understanding maps are useful diagnostics, not guaranteed causal explanations.
+- Spatial resolution is patch-limited (4x4 patch units on 32x32 images).
 
 ## License
-MIT License
+MIT

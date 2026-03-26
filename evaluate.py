@@ -16,10 +16,10 @@ CHECK 3: Understanding Maps (Sanity Check)
   For 8 sample images: generate per-patch heatmaps.
   Sky/background → should be cold (low error, predictable).
   Faces/objects  → should be warm (high error, complex).
-  This is Phase 2 in miniature — just to confirm the signal makes sense.
 
 Run:
   python evaluate.py --checkpoint checkpoints/baseline.pth
+  python evaluate.py --checkpoint checkpoints/baseline_v2.pth
   (or auto-called by train.py)
 """
 
@@ -36,7 +36,6 @@ from sklearn.manifold import TSNE
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score
-import copy
 
 from models import Encoder, Predictor, NUM_PATCHES, EMBED_DIM
 
@@ -53,14 +52,22 @@ os.makedirs("outputs", exist_ok=True)
 
 # ── LOAD CHECKPOINT ───────────────────────────────────────────────────────────
 print(f"Loading checkpoint: {args.checkpoint}")
-ckpt    = torch.load(args.checkpoint, map_location=DEVICE)
-variant = ckpt.get("config", {}).get("variant", "baseline")
-print(f"Variant: {variant}\n")
+ckpt       = torch.load(args.checkpoint, map_location=DEVICE, weights_only=False)
+variant    = ckpt.get("config", {}).get("variant",    "baseline")
+depth      = ckpt.get("config", {}).get("depth",      4)
+pred_depth = ckpt.get("config", {}).get("pred_depth", 2)
 
-encoder = Encoder(depth=4).to(DEVICE)
+# pred_depth fallback: infer from checkpoint keys if not stored in config
+if "blocks.2." in str(list(ckpt["predictor"].keys())):
+    pred_depth = 3
+
+print(f"Variant    : {variant}")
+print(f"Enc depth  : {depth}")
+print(f"Pred depth : {pred_depth}\n")
+
+encoder = Encoder(depth=depth).to(DEVICE)
 encoder.load_state_dict(ckpt["encoder"])
 encoder.eval()
-
 
 # ── DATA ──────────────────────────────────────────────────────────────────────
 eval_transform = transforms.Compose([
@@ -72,12 +79,10 @@ eval_transform = transforms.Compose([
 train_data = datasets.CIFAR10('./data', train=True,  download=True, transform=eval_transform)
 test_data  = datasets.CIFAR10('./data', train=False, download=True, transform=eval_transform)
 
-# Use 2000 train + 1000 test samples for speed
-train_subset = Subset(train_data, range(50000))
-test_subset  = Subset(test_data,  range(1000))
-
-train_loader = DataLoader(train_subset, batch_size=256, shuffle=False, num_workers=0)
-test_loader  = DataLoader(test_subset,  batch_size=256, shuffle=False, num_workers=0)
+# Full 50k train for linear probe (better boundary estimation)
+train_loader = DataLoader(train_data, batch_size=256, shuffle=False, num_workers=0)
+test_loader  = DataLoader(Subset(test_data, range(1000)), batch_size=256,
+                          shuffle=False, num_workers=0)
 
 
 # ── EXTRACT REPRESENTATIONS ───────────────────────────────────────────────────
@@ -86,9 +91,9 @@ def extract_representations(loader, encoder, device):
     reprs, labels = [], []
     with torch.no_grad():
         for imgs, lbls in loader:
-            imgs = imgs.to(device)
+            imgs   = imgs.to(device)
             tokens = encoder(imgs)           # (B, 64, EMBED_DIM)
-            pooled = tokens.mean(dim=1)      # (B, EMBED_DIM) — mean over patches
+            pooled = tokens.mean(dim=1)      # (B, EMBED_DIM)
             reprs.append(pooled.cpu().numpy())
             labels.append(lbls.numpy())
     return np.concatenate(reprs), np.concatenate(labels)
@@ -104,7 +109,7 @@ print(f"  Train: {train_repr.shape} | Test: {test_repr.shape}")
 # ─────────────────────────────────────────────────────────────────────────────
 print("\n── CHECK 1: Linear Probe ─────────────────────────────────────────────")
 
-scaler     = StandardScaler()
+scaler            = StandardScaler()
 train_repr_scaled = scaler.fit_transform(train_repr)
 test_repr_scaled  = scaler.transform(test_repr)
 
@@ -114,8 +119,8 @@ clf.fit(train_repr_scaled, train_labels)
 train_acc = accuracy_score(train_labels, clf.predict(train_repr_scaled)) * 100
 test_acc  = accuracy_score(test_labels,  clf.predict(test_repr_scaled))  * 100
 
-print(f"  Train accuracy: {train_acc:.1f}%")
-print(f"  Test  accuracy: {test_acc:.1f}%")
+print(f"  Train accuracy : {train_acc:.1f}%")
+print(f"  Test  accuracy : {test_acc:.1f}%")
 print(f"  Random baseline: 10.0%")
 
 if test_acc > 40:
@@ -133,15 +138,15 @@ print(f"  Verdict: {verdict}\n")
 print("── CHECK 2: t-SNE Visualization ──────────────────────────────────────")
 print("  Running t-SNE on 1000 test representations (this takes ~1-2 min)...")
 
-tsne = TSNE(n_components=2, random_state=42, perplexity=30, max_iter=1000)
-emb_2d  = tsne.fit_transform(test_repr_scaled)
+tsne   = TSNE(n_components=2, random_state=42, perplexity=30, max_iter=1000)
+emb_2d = tsne.fit_transform(test_repr_scaled)
 
-colors  = plt.cm.get_cmap('tab10', 10)
+colors  = plt.colormaps['tab10'].resampled(10)
 fig, ax = plt.subplots(figsize=(10, 8))
 for cls_id in range(10):
     mask = test_labels == cls_id
     ax.scatter(emb_2d[mask, 0], emb_2d[mask, 1],
-               c=[colors(cls_id)], label=CIFAR_CLASSES[cls_id],
+               color=colors(cls_id), label=CIFAR_CLASSES[cls_id],
                alpha=0.7, s=15, linewidths=0)
 ax.legend(markerscale=2, fontsize=9, loc='upper right')
 ax.set_title(f"t-SNE of JEPA Encoder Representations ({variant})\n"
@@ -157,28 +162,19 @@ print(f"  ✓ Saved → outputs/tsne_{variant}.png")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CHECK 3: UNDERSTANDING MAPS (per-patch, sanity check)
+# CHECK 3: UNDERSTANDING MAPS
 # ─────────────────────────────────────────────────────────────────────────────
 print("\n── CHECK 3: Understanding Maps (sanity check) ────────────────────────")
 
-# Reload predictor for this check
-predictor = Predictor(depth=2).to(DEVICE)
+predictor = Predictor(depth=pred_depth).to(DEVICE)
 predictor.load_state_dict(ckpt["predictor"])
 predictor.eval()
 
-# Get 8 test images
-viz_loader = DataLoader(test_data, batch_size=8, shuffle=True, num_workers=0)
+viz_loader   = DataLoader(test_data, batch_size=8, shuffle=True, num_workers=0)
 imgs, labels = next(iter(viz_loader))
-imgs = imgs.to(DEVICE)
+imgs         = imgs.to(DEVICE)
 
 def per_patch_error_map(img_batch, encoder, predictor, device):
-    """
-    For each patch i:
-      - Context = all other patches
-      - Target  = patch i
-      - Error   = L2 distance between predicted and true representation
-    Returns (B, NUM_PATCHES) error array.
-    """
     B           = img_batch.shape[0]
     error_maps  = np.zeros((B, NUM_PATCHES))
     all_indices = list(range(NUM_PATCHES))
@@ -188,49 +184,39 @@ def per_patch_error_map(img_batch, encoder, predictor, device):
             ctx_idx = [j for j in all_indices if j != tgt_i]
             tgt_idx = [tgt_i]
 
-            ctx_repr = encoder(img_batch, patch_indices=ctx_idx)  # (B, 63, D)
-            tgt_repr = encoder(img_batch, patch_indices=tgt_idx)  # (B, 1, D)
-            tgt_repr = F.layer_norm(tgt_repr, [EMBED_DIM])
+            ctx_repr  = encoder(img_batch, patch_indices=ctx_idx)
+            tgt_repr  = encoder(img_batch, patch_indices=tgt_idx)
+            tgt_repr  = F.layer_norm(tgt_repr, [EMBED_DIM])
+            pred_repr = predictor(ctx_repr, ctx_idx, tgt_idx)
 
-            pred_repr = predictor(ctx_repr, ctx_idx, tgt_idx)     # (B, 1, D)
-
-            err = ((pred_repr - tgt_repr) ** 2).mean(dim=-1)      # (B, 1)
+            err = ((pred_repr - tgt_repr) ** 2).mean(dim=-1)
             error_maps[:, tgt_i] = err.squeeze(-1).cpu().numpy()
 
-    return error_maps   # (B, 64)
+    return error_maps
 
 print("  Computing per-patch error maps for 8 images (64 forward passes each)...")
-error_maps = per_patch_error_map(imgs, encoder, predictor, DEVICE)  # (8, 64)
+error_maps = per_patch_error_map(imgs, encoder, predictor, DEVICE)
 
-# Grid size
-G = 8  # 8x8 patches for 32x32 image with patch size 4
-
-# Denormalize for display
+G    = 8
 mean = torch.tensor([0.4914, 0.4822, 0.4465])
 std  = torch.tensor([0.2023, 0.1994, 0.2010])
-imgs_display = imgs.cpu() * std.view(3,1,1) + mean.view(3,1,1)
-imgs_display = imgs_display.clamp(0, 1)
+imgs_display = (imgs.cpu() * std.view(3,1,1) + mean.view(3,1,1)).clamp(0, 1)
 
 fig = plt.figure(figsize=(16, 5))
 gs  = gridspec.GridSpec(2, 8, hspace=0.3, wspace=0.1)
 
 for i in range(8):
-    # Original image
     ax_img = fig.add_subplot(gs[0, i])
     ax_img.imshow(imgs_display[i].permute(1, 2, 0).numpy())
     ax_img.set_title(CIFAR_CLASSES[labels[i]], fontsize=8)
     ax_img.axis('off')
 
-    # Understanding map (heatmap of per-patch error)
-    ax_map = fig.add_subplot(gs[1, i])
-    err_grid = error_maps[i].reshape(G, G)
-
-    # Upsample to image size for visual clarity
-    err_tensor  = torch.tensor(err_grid).unsqueeze(0).unsqueeze(0).float()
-    err_upsampled = F.interpolate(err_tensor, size=(32, 32), mode='bilinear',
-                                  align_corners=False).squeeze().numpy()
-
-    ax_map.imshow(err_upsampled, cmap='RdYlGn_r', interpolation='nearest')
+    ax_map     = fig.add_subplot(gs[1, i])
+    err_grid   = error_maps[i].reshape(G, G)
+    err_tensor = torch.tensor(err_grid).unsqueeze(0).unsqueeze(0).float()
+    err_up     = F.interpolate(err_tensor, size=(32, 32), mode='bilinear',
+                               align_corners=False).squeeze().numpy()
+    ax_map.imshow(err_up, cmap='RdYlGn_r', interpolation='nearest')
     ax_map.axis('off')
     if i == 0:
         ax_map.set_title('understanding\nmap', fontsize=7)
@@ -256,7 +242,7 @@ print("="*55)
 print(f"  Linear probe accuracy : {test_acc:.1f}%  (random = 10%)")
 print(f"  Verdict               : {verdict}")
 print(f"\n  What to check in the output files:")
-print(f"  outputs/loss_curve.png            — should fall steadily")
-print(f"  outputs/tsne_{variant}.png         — should show loose clusters")
-print(f"  outputs/understanding_map_{variant}.png — red on objects, green on bg")
+print(f"  outputs/loss_curve.png")
+print(f"  outputs/tsne_{variant}.png")
+print(f"  outputs/understanding_map_{variant}.png")
 print("="*55)
