@@ -337,7 +337,7 @@ def build_dashboard() -> str:
   .hero, .section { border: 1px solid var(--line); border-radius: 28px; background: var(--panel); box-shadow: var(--shadow); }
   .hero { padding: 28px; display: grid; gap: 24px; }
   .eyebrow { display: inline-flex; width: fit-content; gap: 10px; align-items: center; padding: 8px 12px; border-radius: 999px; background: var(--orange-soft); color: var(--orange); font: 0.78rem "IBM Plex Mono", monospace; text-transform: uppercase; }
-  .hero-grid { display: grid; gap: 24px; grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr); }
+  .hero-grid { display: grid; gap: 24px; grid-template-columns: minmax(0, 1fr); }
   .hero h1 { font-size: clamp(2.8rem, 6vw, 5.3rem); line-height: 0.95; letter-spacing: -0.05em; max-width: 11ch; }
   .hero h1 span { color: var(--orange); }
   .hero p.lead { max-width: 68ch; color: var(--muted); font-size: 1rem; margin-top: 16px; }
@@ -438,13 +438,6 @@ def build_dashboard() -> str:
           <span>Representation-space MSE</span>
           <span>4 controlled variants</span>
         </div>
-      </div>
-      <div class="callout">
-        <strong>The strongest claim is in the deltas, not a single heatmap.</strong>
-        <p>
-          Variant shifts plus the validation suite are what make the report useful.
-          The page below is organized so you can move from intuition to evidence quickly.
-        </p>
       </div>
     </div>
     <div class="stats">
