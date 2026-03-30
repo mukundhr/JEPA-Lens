@@ -1,5 +1,3 @@
-"""Generate the self-contained JEPA-Lens dashboard."""
-
 from __future__ import annotations
 
 import base64
